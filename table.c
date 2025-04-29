@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdarg.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
 const char* global_styles[][4] = {
     {"+", "+", "+", "-"},

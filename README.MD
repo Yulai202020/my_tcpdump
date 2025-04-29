@@ -1,0 +1,5 @@
+# compile
+
+```bash
+cmake --build .
+```
