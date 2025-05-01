@@ -30,6 +30,7 @@ int port = 53;
 typedef struct {
     int type;
     int class;
+    char* name;
 } DNS_Data;
 
 char* itos(int value) {
@@ -166,6 +167,8 @@ int match_filter(DNS_Data item, const char* filter) {
             return 0;
         } else if (strcmp(key, "class") == 0 && item.class == atoi(value)) {
             return 0;
+        } else if (strcmp(key, "name") == 0 && strcmp(item.name, value) == 0) {
+            return 0;
         }
     }
 
@@ -244,12 +247,22 @@ void packet_handler(unsigned char* user, const pcap_pkthdr* header, const unsign
 
     // questions
     for (int i = 0; i < qdcount; i++) {
+        int length = 0;
         unsigned char tmp = packet[start];
 
-        while (tmp != NULL) {
-            start += 1;
-            tmp = packet[start];
+        for (; tmp != NULL; length++) {
+            tmp = packet[start + length + 1];
         }
+
+        printf("%d\n", length);
+
+        char* name = malloc((length + 1) * sizeof(char));
+
+        for (int k = 0; k < length; k++) {
+            name[k] = (char) packet[start + k];
+        }
+
+        name[length] = '\0';
 
         start += 1; // skip name
 
@@ -258,8 +271,11 @@ void packet_handler(unsigned char* user, const pcap_pkthdr* header, const unsign
 
         start += 4;
 
+        data[i].name = name;
         data[i].type = qtype;
         data[i].class = qclass;
+
+        free(name);
 
         if (dns_filters && !match_filter(data[i], dns_filters)) {
             return;
