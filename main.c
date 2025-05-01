@@ -271,7 +271,7 @@ void packet_handler(unsigned char* user, const pcap_pkthdr* header, const unsign
 
         start += 4;
 
-        data[i].name = name;
+        memcpy(data[i].name, name, length+1);
         data[i].type = qtype;
         data[i].class = qclass;
 
