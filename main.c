@@ -64,10 +64,14 @@ char** split_by_space(char* input, int* count) {
 bool ends_with(const char *str, const char *suffix) {
     if (!str || !suffix)
         return false;
+
     size_t len_str = strlen(str);
     size_t len_suffix = strlen(suffix);
+
     if (len_suffix > len_str)
         return false;
+
+    // Compare the end of `str` with `suffix`
     return strncmp(str + len_str - len_suffix, suffix, len_suffix) == 0;
 }
 
@@ -321,9 +325,9 @@ int main(int argc, char* argv[]) {
     while ((opt = getopt(argc, argv, "w:s:c:f:d:a:p:h")) != -1) {
         switch (opt) {
             case 'w':
-                if (ends_with(output, ".json") || ends_with(output, ".jsonl")) {
+                if (ends_with(optarg, ".json") || ends_with(optarg, ".jsonl")) {
                     json_file = optarg;
-                } else if (ends_with(output, ".db")) {
+                } else if (ends_with(optarg, ".db")) {
                     db_file = optarg;
                 } else { // pcap
                     output = optarg;
@@ -354,10 +358,11 @@ int main(int argc, char* argv[]) {
                 printf("Options:\n");
                 printf("-w  Write captured data to file\n");
                 printf("-c  Sets max count of captured packets\n");
-                printf("-f  Sets filters\n");
                 printf("-d  Get data from config file\n");
+                printf("-f  Sets filters\n");
                 printf("-a  Sets dns filters\n");
-                printf("-p  Sets dns port\n");
+                printf("-p  Specify dns port\n");
+                printf("-h  Get help\n");
                 return 0;
                 break;
             default:
