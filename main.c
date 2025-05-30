@@ -20,6 +20,11 @@ typedef struct {
     char name[256];
 } DNS_Data;
 
+typedef struct {
+    char *data;
+    size_t size;
+} MemoryStruct;
+
 pcap_t* handle = NULL;
 pcap_dumper_t* dumper = NULL;
 json_object* jarray = NULL;
@@ -104,12 +109,13 @@ int match_filter(DNS_Data item, const char* filter) {
         char* value = strtok(NULL, " ");
         if (!value) break;
 
-        if (strcmp(key, "type") == 0 && item.type != atoi(value)) return 1;
-        if (strcmp(key, "class") == 0 && item.class != atoi(value)) return 1;
-        if (strcmp(key, "name") == 0 && strcmp(item.name, value) != 0) return 1;
+        if (strcmp(key, "type") == 0 && item.type == atoi(value)) return 1;
+        if (strcmp(key, "class") == 0 && item.class == atoi(value)) return 1;
+        if (strcmp(key, "name") == 0 && strcmp(item.name, value) == 0) return 1;
 
         token = strtok(NULL, " ");
     }
+
     return 0;
 }
 
@@ -146,6 +152,125 @@ int parse_dns_name(const unsigned char *packet, int start, char *name) {
 
 size_t write_callback(void *ptr, size_t size, size_t nmemb, void *userdata) {
     return size * nmemb;  // ignore data
+}
+
+size_t memory_write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    MemoryStruct *mem = (MemoryStruct *)userp;
+
+    char *ptr = realloc(mem->data, mem->size + realsize + 1);
+    if (!ptr) return 0;
+
+    mem->data = ptr;
+    memcpy(&(mem->data[mem->size]), contents, realsize);
+    mem->size += realsize;
+    mem->data[mem->size] = 0;
+
+    return realsize;
+}
+
+json_object* load_json_from_url(const char *url) {
+    CURL *curl;
+    CURLcode res;
+    MemoryStruct chunk = { .data = NULL, .size = 0 };
+
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    curl = curl_easy_init();
+
+    if (!curl) return NULL;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, memory_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    res = curl_easy_perform(curl);
+
+    json_object *json = NULL;
+    if (res == CURLE_OK) {
+        json = json_tokener_parse(chunk.data);
+    } else {
+        fprintf(stderr, "Failed to fetch config JSON: %s\n", curl_easy_strerror(res));
+    }
+
+    curl_easy_cleanup(curl);
+    curl_global_cleanup();
+    free(chunk.data);
+
+    return json;
+}
+
+
+char* join_json_array_ints(json_object* jarray, const char *delimiter) {
+    if (!json_object_is_type(jarray, json_type_array)) return NULL;
+
+    int len = json_object_array_length(jarray);
+    size_t delimiter_len = strlen(delimiter);
+    size_t total_len = 0;
+
+    // Temporary buffer for int->string conversion
+    char temp[32];
+
+    // First pass: calculate total length
+    for (int i = 0; i < len; ++i) {
+        json_object* item = json_object_array_get_idx(jarray, i);
+        if (json_object_is_type(item, json_type_int)) {
+            int value = json_object_get_int(item);
+            int chars = snprintf(temp, sizeof(temp), "%d", value);
+            total_len += chars;
+            if (i < len - 1) total_len += delimiter_len;
+        }
+    }
+
+    // Allocate result buffer
+    char *result = malloc(total_len + 1);
+    if (!result) return NULL;
+    result[0] = '\0';
+
+    // Second pass: build the string
+    for (int i = 0; i < len; ++i) {
+        json_object* item = json_object_array_get_idx(jarray, i);
+        if (json_object_is_type(item, json_type_int)) {
+            snprintf(temp, sizeof(temp), "%d", json_object_get_int(item));
+            strcat(result, temp);
+            if (i < len - 1) strcat(result, delimiter);
+        }
+    }
+
+    return result;
+}
+
+char* join_json_array_strings(json_object* jarray, const char *delimiter) {
+    if (!json_object_is_type(jarray, json_type_array)) return NULL;
+
+    int len = json_object_array_length(jarray);
+    size_t total_len = 0;
+    size_t delimiter_len = strlen(delimiter);
+
+    // First pass: calculate total length
+    for (int i = 0; i < len; i++) {
+        json_object* item = json_object_array_get_idx(jarray, i);
+        if (json_object_is_type(item, json_type_string)) {
+            const char *s = json_object_get_string(item);
+            total_len += strlen(s);
+            if (i < len - 1) total_len += delimiter_len;
+        }
+    }
+
+    // Allocate and build the string
+    char *result = malloc(total_len + 1);
+    if (!result) return NULL;
+    result[0] = '\0';
+
+    for (int i = 0; i < len; i++) {
+        json_object* item = json_object_array_get_idx(jarray, i);
+        if (json_object_is_type(item, json_type_string)) {
+            strcat(result, json_object_get_string(item));
+            if (i < len - 1) strcat(result, delimiter);
+        }
+    }
+
+    return result;
 }
 
 void packet_handler(unsigned char* user, const struct pcap_pkthdr* header, const unsigned char* packet) {
@@ -249,22 +374,22 @@ void packet_handler(unsigned char* user, const struct pcap_pkthdr* header, const
 
         start += 10;
 
-        char *sname = malloc(length + 1);
-        if (!sname) {
-            fprintf(stderr, "Memory allocation failed\n");
-            return;
-        }
+        char rdata_str[256] = {0};
 
-        memcpy(sname, packet + start, length);
-        sname[length] = '\0';
+        if (atype == 1 && length == 4) {
+            inet_ntop(AF_INET, packet + start, rdata_str, sizeof(rdata_str));
+        } else if (atype == 5) {
+        } else {
+            for (int j = 0; j < length && j < 255; j++) {
+                sprintf(rdata_str + j*2, "%02x", packet[start + j]);
+            }
+        }
 
         start += length;
 
-        printf("%d\n", length);
-
         json_object_array_add(atypes, json_object_new_int(atype));
         json_object_array_add(aclasses, json_object_new_int(aclass));
-        json_object_array_add(anames, json_object_new_string(sname));
+        json_object_array_add(anames, json_object_new_string(rdata_str));
     }
 
     json_object_object_add(questions, "types", qtypes);
@@ -283,7 +408,7 @@ void packet_handler(unsigned char* user, const struct pcap_pkthdr* header, const
 
     // print data
     print_middle(table);
-    print_ln(table, itos(header->len), srcIP, itos(srcPort), dstIP, itos(dstPort), itos(id), itos(qdcount), itos(ancount));
+    print_ln(table, itos(header->len), srcIP, itos(srcPort), dstIP, itos(dstPort), itos(id), itos(qdcount), itos(ancount), join_json_array_ints(qtypes, ","), join_json_array_strings(qnames, ","));
 
     // dump to file
     if (dumper) {
@@ -376,43 +501,20 @@ int main(int argc, char* argv[]) {
     if (json_file) jarray = json_object_new_array();
 
     if (url) {
-        CURL *curl;
-        FILE *fp;
-        CURLcode res;
+        json_object *remote_config = load_json_from_url(url);
 
-        const char *outfilename = "output.json";
+        if (remote_config) {
+            config_file = NULL;
 
-        curl_global_init(CURL_GLOBAL_DEFAULT);
-        curl = curl_easy_init();
+            json_object *v;
+            if (json_object_object_get_ex(remote_config, "dns_filter", &v)) dns_filters = strdup(json_object_get_string(v));
+            if (json_object_object_get_ex(remote_config, "filter", &v)) filter_exp = strdup(json_object_get_string(v));
+            if (json_object_object_get_ex(remote_config, "output", &v)) output = strdup(json_object_get_string(v));
+            if (json_object_object_get_ex(remote_config, "count", &v)) max_count = json_object_get_int(v);
+            if (json_object_object_get_ex(remote_config, "server_url", &v)) server_endpoint_url = strdup(json_object_get_string(v));
 
-        if (curl) {
-            fp = fopen(outfilename, "wb");
-            if (!fp) {
-                perror("fopen");
-                return 1;
-            }
-
-            curl_easy_setopt(curl, CURLOPT_URL, url);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
-
-            curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-
-            res = curl_easy_perform(curl);
-
-            if (res != CURLE_OK)
-                fprintf(stderr, "Download failed: %s\n", curl_easy_strerror(res));
-            else
-                printf("File downloaded successfully to '%s'\n", outfilename);
-
-            fclose(fp);
-            curl_easy_cleanup(curl);
+            json_object_put(remote_config);
         }
-
-        curl_global_cleanup();
-
-
-        config_file = outfilename;
     }
 
     if (config_file) {
@@ -420,11 +522,13 @@ int main(int argc, char* argv[]) {
 
         if (json) {
             json_object *v;
+
             if (json_object_object_get_ex(json, "dns_filter", &v)) dns_filters = strdup(json_object_get_string(v));
             if (json_object_object_get_ex(json, "filter", &v)) filter_exp = strdup(json_object_get_string(v));
             if (json_object_object_get_ex(json, "output", &v)) output = strdup(json_object_get_string(v));
             if (json_object_object_get_ex(json, "count", &v)) max_count = json_object_get_int(v);
             if (json_object_object_get_ex(json, "server_url", &v)) server_endpoint_url = strdup(json_object_get_string(v));
+
             json_object_put(json);
         }
     }
@@ -460,10 +564,10 @@ int main(int argc, char* argv[]) {
         sqlite3_exec(db, sql, 0, 0, NULL);
     }
 
-    int widths[] = {13, 15, 11, 15, 16, 5, 18, 16};
-    table = init_table(8, widths, 1);
+    int widths[] = {13, 15, 11, 15, 16, 5, 18, 16, 15, 15};
+    table = init_table(10, widths, 1);
     print_start(table);
-    print_ln(table, "Packet Length", "source ip", "source port", "destination ip", "destination port", "ID", "Questions", "Answers");
+    print_ln(table, "Packet Length", "source ip", "source port", "destination ip", "destination port", "ID", "Questions", "Answers", "Queries types", "Queries names");
 
     pcap_loop(handle, 0, packet_handler, NULL);
     print_end(table);
